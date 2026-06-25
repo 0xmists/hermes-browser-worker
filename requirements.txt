@@ -1,6 +1,6 @@
 fastapi
 uvicorn[standard]
-playwright==1.60.0
+playwright
 beautifulsoup4
 httpx
 python-multipart

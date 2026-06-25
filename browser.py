@@ -67,8 +67,9 @@ class BrowserManager:
                 "--disable-gpu",
                 "--disable-software-rasterizer",
                 "--no-sandbox",
-                "--single-process",   # critical for 1 GB RAM
                 "--disable-setuid-sandbox",
+                "--disable-extensions",
+                "--disable-background-networking",
             ],
         )
 
