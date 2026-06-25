@@ -1,6 +1,7 @@
 fastapi
 uvicorn[standard]
-playwright
+playwright==1.60.0
 beautifulsoup4
 httpx
 python-multipart
+markdownify
