@@ -1,36 +1,96 @@
 """
 hermes-browser-worker — FastAPI + Playwright service for Railway.
+
 Endpoints:
     GET  /health
     POST /browse
     POST /search
     POST /extract
+    POST /markdown
     POST /screenshot
     POST /click
     POST /fill
     POST /cookies/save
     POST /cookies/load
+    POST /close
+    POST /raw
 """
+
+from __future__ import annotations
 
 import json
 import os
 import re
 import time
+import logging
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 from playwright.async_api import TimeoutError as PlaywrightTimeout
 
-from browser import BrowserManager
+from browser import BrowserManager, SESSIONS_DIR
+
+port = int(os.getenv("PORT", 8080))
+API_KEY = os.getenv("API_KEY", "")
+MAX_SESSIONS = int(os.getenv("MAX_SESSIONS", "5"))
 
 app = FastAPI(
     title="Hermes Browser Worker",
-    version="0.1.0",
+    version="0.2.0",
     description="Playwright browser automation as a service for Hermes CLI",
 )
 
-_manager = BrowserManager()
+_logger = logging.getLogger("browser-worker")
+
+_manager = BrowserManager(max_sessions=MAX_SESSIONS)
+
+
+# ──────────────────────────────────────────────
+#   Security: API key middleware
+# ──────────────────────────────────────────────
+
+@app.middleware("http")
+async def api_key_guard(request: Request, call_next):
+    # Allow health checks and docs without credentials
+    if request.url.path in ("/health", "/docs", "/openapi.json", "/redoc"):
+        return await call_next(request)
+    if not API_KEY:
+        return await call_next(request)
+    provided = request.headers.get("x-api-key", "")
+    if provided != API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    return await call_next(request)
+
+
+# ──────────────────────────────────────────────
+#   Logging middleware
+# ──────────────────────────────────────────────
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    t0 = time.time()
+    response = await call_next(request)
+    elapsed = time.time() - t0
+    session_id = ""
+    if response.status_code < 500 and hasattr(response, "body"):
+        try:
+            body = response.body
+            if isinstance(body, (list, tuple)):
+                body = next(iter(body), b"")
+            data = json.loads(body or b"{}")
+            session_id = str(data.get("session_id", ""))
+        except Exception:
+            pass
+    _logger.info(
+        "%-6s %-20s session=%-12s status=%d time=%.2fs",
+        request.method,
+        request.url.path,
+        session_id or "-",
+        response.status_code,
+        elapsed,
+    )
+    return response
 
 
 # ──────────────────────────────────────────────
@@ -47,11 +107,18 @@ class BrowseReq(BaseModel):
 
 class SearchReq(BaseModel):
     query: str
-    engine: str = "google"
+    engine: str = "duckduckgo"
     session_id: str = Field(default_factory=lambda: os.urandom(8).hex())
     page_id: str = "main"
 
 class ExtractReq(BaseModel):
+    url: str
+    session_id: str = Field(default_factory=lambda: os.urandom(8).hex())
+    page_id: str = "main"
+    selector: Optional[str] = None
+    timeout_ms: int = 30000
+
+class MarkdownReq(BaseModel):
     url: str
     session_id: str = Field(default_factory=lambda: os.urandom(8).hex())
     page_id: str = "main"
@@ -139,12 +206,13 @@ async def browse(req: BrowseReq):
 @app.post("/search")
 async def search(req: SearchReq):
     engines = {
-        "google": "https://www.google.com/search?q={q}",
         "duckduckgo": "https://duckduckgo.com/?q={q}&ia=web",
         "bing": "https://www.bing.com/search?q={q}",
+        "google": "https://www.google.com/search?q={q}",
     }
-    tmpl = engines.get(req.engine, engines["google"])
-    url = tmpl.format(q=req.query.replace(" ", "+"))
+    if req.engine not in engines:
+        raise HTTPException(status_code=400, detail=f"Unsupported engine: {req.engine}. Use: {', '.join(engines)}")
+    url = engines[req.engine].format(q=req.query.replace(" ", "+"))
     page = await _manager.get_or_create_page(req.session_id, req.page_id)
     try:
         await page.goto(url, wait_until="domcontentloaded", timeout=35000)
@@ -200,6 +268,41 @@ async def extract(req: ExtractReq):
         "url": page.url,
         "selector": req.selector,
         "text": text,
+        "chars": len(text),
+        "elapsed_ms": int((time.time() - t0) * 1000),
+    }
+
+
+@app.post("/markdown")
+async def markdown(req: MarkdownReq):
+    t0 = time.time()
+    page = await _manager.get_or_create_page(req.session_id, req.page_id)
+
+    try:
+        await page.goto(req.url, wait_until="domcontentloaded", timeout=req.timeout_ms)
+    except PlaywrightTimeout:
+        raise HTTPException(status_code=408, detail="Load timed out")
+
+    if req.selector:
+        try:
+            el = await page.wait_for_selector(req.selector, timeout=req.timeout_ms)
+            if el is None:
+                raise HTTPException(status_code=404, detail=f"Selector not found: {req.selector}")
+            html = await el.inner_html()
+        except PlaywrightTimeout:
+            raise HTTPException(status_code=408, detail="Selector wait timed out")
+    else:
+        html = await page.content()
+
+    from markdownify import markdownify as md
+    text = md(html, heading_style="ATX")
+
+    await _manager.save_session(req.session_id)
+    return {
+        "ok": True,
+        "session_id": req.session_id,
+        "url": page.url,
+        "markdown": text,
         "chars": len(text),
         "elapsed_ms": int((time.time() - t0) * 1000),
     }
@@ -310,8 +413,7 @@ async def fill(req: FillReq):
 @app.post("/cookies/save")
 async def cookies_save(session_id: str):
     await _manager.save_session(session_id)
-    from pathlib import Path
-    p = Path("/app/sessions") / f"{session_id}.json"
+    p = SESSIONS_DIR / f"{session_id}.json"
     exists = p.exists()
     size = p.stat().st_size if exists else 0
     return {"ok": True, "session_id": session_id, "saved": exists, "bytes": size}
@@ -319,8 +421,58 @@ async def cookies_save(session_id: str):
 
 @app.post("/cookies/load")
 async def cookies_load(session_id: str):
-    from pathlib import Path
-    p = Path("/app/sessions") / f"{session_id}.json"
+    p = SESSIONS_DIR / f"{session_id}.json"
     if not p.exists():
         raise HTTPException(status_code=404, detail="Session not found")
     return {"ok": True, "session_id": session_id, "path": str(p)}
+
+
+@app.post("/close")
+async def close_session(req: Request):
+    body = await req.body()
+    data = json.loads(body or b"{}")
+    session_id = data.get("session_id")
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id required")
+    await _manager.close_session(session_id)
+    return {"ok": True, "session_id": session_id, "status": "closed"}
+
+
+@app.post("/raw")
+async def raw(req: Request):
+    body = await req.body()
+    data = json.loads(body or b"{}")
+    session_id = data.get("session_id")
+    url = data.get("url")
+    selector = data.get("selector")
+    timeout_ms = int(data.get("timeout_ms", 30000))
+    if not session_id or not url:
+        raise HTTPException(status_code=400, detail="session_id and url required")
+
+    t0 = time.time()
+    page = await _manager.get_or_create_page(session_id)
+    try:
+        await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+    except PlaywrightTimeout:
+        raise HTTPException(status_code=408, detail="Load timed out")
+
+    if selector:
+        try:
+            el = await page.wait_for_selector(selector, timeout=timeout_ms)
+            if el is None:
+                raise HTTPException(status_code=404, detail=f"Selector not found: {selector}")
+            html = await el.inner_html()
+        except PlaywrightTimeout:
+            raise HTTPException(status_code=408, detail="Selector wait timed out")
+    else:
+        html = await page.content()
+
+    await _manager.save_session(session_id)
+    return {
+        "ok": True,
+        "session_id": session_id,
+        "url": page.url,
+        "html": html,
+        "chars": len(html),
+        "elapsed_ms": int((time.time() - t0) * 1000),
+    }
