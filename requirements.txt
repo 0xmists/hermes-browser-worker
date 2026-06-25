@@ -1,0 +1,6 @@
+fastapi
+uvicorn[standard]
+playwright
+beautifulsoup4
+httpx
+python-multipart
