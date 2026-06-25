@@ -460,7 +460,12 @@ async def fill(req: FillReq):
 # ──────────────────────────────────────────────
 
 @app.post("/cookies/save")
-async def cookies_save(session_id: str):
+async def cookies_save(request: Request):
+    body = await request.body()
+    data = json.loads(body or b'{}')
+    session_id = data.get("session_id")
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id required")
     await _manager.save_session(session_id)
     p = SESSIONS_DIR / f"{session_id}.json"
     exists = p.exists()
@@ -469,7 +474,12 @@ async def cookies_save(session_id: str):
 
 
 @app.post("/cookies/load")
-async def cookies_load(session_id: str):
+async def cookies_load(request: Request):
+    body = await request.body()
+    data = json.loads(body or b'{}')
+    session_id = data.get("session_id")
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id required")
     p = SESSIONS_DIR / f"{session_id}.json"
     if not p.exists():
         raise HTTPException(status_code=404, detail="Session not found")
