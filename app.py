@@ -348,15 +348,14 @@ async def screenshot(req: ScreenshotReq):
             except PlaywrightTimeout:
                 raise HTTPException(status_code=408, detail="Load timed out for screenshot")
 
-        out_path = f"/tmp/screenshot_{req.session_id}_{req.page_id}.png"
         try:
             if req.selector:
                 el = await page.wait_for_selector(req.selector, timeout=req.timeout_ms)
                 if el is None:
                     raise HTTPException(status_code=404, detail="Selector not found for screenshot")
-                await el.screenshot(path=out_path, full_page=req.full_page)
+                img_bytes = await el.screenshot(full_page=req.full_page)
             else:
-                await page.screenshot(path=out_path, full_page=req.full_page)
+                img_bytes = await page.screenshot(full_page=req.full_page)
         except PlaywrightTimeout:
             raise HTTPException(status_code=408, detail="Selector wait timed out")
         except HTTPException:
@@ -364,11 +363,16 @@ async def screenshot(req: ScreenshotReq):
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Screenshot failed: {e}")
 
+        import base64
+        img_b64 = base64.b64encode(img_bytes).decode("ascii")
+
         await _manager.save_session(req.session_id)
         return {
             "ok": True,
             "session_id": req.session_id,
-            "path": out_path,
+            "content_type": "image/png",
+            "image_base64": img_b64,
+            "chars": len(img_b64),
             "elapsed_ms": int((time.time() - t0) * 1000),
         }
     except HTTPException:
