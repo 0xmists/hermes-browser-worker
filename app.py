@@ -589,10 +589,7 @@ async def login_start(req: LoginStartReq, request: Request):
         # Convert /login/{token} path to full URL
         if resp.connect_url and resp.connect_url.startswith("/login/"):
             host = request.headers.get("host", "")
-            # Railway always serves HTTPS; respect X-Forwarded-Proto if present
-            scheme = request.headers.get("x-forwarded-proto",
-                                         "https" if request.url.scheme == "https" else "http")
-            resp.connect_url = f"{scheme}://{host}{resp.connect_url}"
+            resp.connect_url = f"https://{host}{resp.connect_url}"
         return resp
     except Exception as e:
         import traceback
