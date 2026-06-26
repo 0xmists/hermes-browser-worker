@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 from login_providers import LoginProvider, LoginSession, LoginState
-from auth_detectors import AuthDetector, AuthResult
+from auth_detectors import AuthDetector
 from providers.playwright_ws import get_ws_server
 
 if TYPE_CHECKING:
@@ -50,41 +50,53 @@ class PlaywrightWSProvider(LoginProvider):
         3. Start auth monitoring (if detector provided)
         4. Return session with connect_url
         """
-        # Ensure profile exists
-        await self.pm.ensure_profile(session.profile_name)
+        try:
+            # Ensure profile exists
+            await self.pm.ensure_profile(session.profile_name)
 
-        # Get the context for auth monitoring
-        ctx = await self.pm.get_context(session.profile_name)
+            # Get the context for auth monitoring
+            ctx = await self.pm.get_context(session.profile_name)
+            if ctx is None:
+                raise RuntimeError(f"Failed to get context for profile {session.profile_name}")
 
-        # Expose via WebSocket
-        ws_server = get_ws_server()
-        connect_path = await ws_server.expose_context(
-            session.session_id,
-            ctx,
-            ttl=600,
-        )
-
-        # Build full connect_url (will be filled by app.py with host info)
-        session.connect_url = connect_path
-        session.state = LoginState.WAITING_USER
-        session.expires_at = time.time() + 600
-        session.transport_id = session.session_id
-
-        self._active[session.session_id] = session
-
-        # Start auth monitoring in background
-        if auth_detector:
-            task = asyncio.create_task(
-                self._monitor_auth(session.session_id, ctx, auth_detector)
+            # Expose via WebSocket
+            ws_server = get_ws_server()
+            connect_path = await ws_server.expose_context(
+                session.session_id,
+                ctx,
+                ttl=600,
             )
-            self._auth_tasks[session.session_id] = task
 
-        logger.info(
-            "Started login session %s for %s",
-            session.session_id[:16],
-            session.site,
-        )
-        return session
+            # Build full connect_url (will be filled by app.py with host info)
+            session.connect_url = connect_path
+            session.state = LoginState.WAITING_USER
+            session.expires_at = time.time() + 600
+            session.transport_id = session.session_id
+
+            self._active[session.session_id] = session
+
+            # Start auth monitoring in background
+            if auth_detector:
+                task = asyncio.create_task(
+                    self._monitor_auth(session.session_id, ctx, auth_detector)
+                )
+                self._auth_tasks[session.session_id] = task
+
+            logger.info(
+                "Started login session %s for %s (connect_url=%s)",
+                session.session_id[:16],
+                session.site,
+                connect_path,
+            )
+            return session
+        except Exception as e:
+            logger.error("PlaywrightWSProvider.start failed: %s", e, exc_info=True)
+            # Fall back to stub behavior — return session without transport
+            session.login_url = session.site if session.site.startswith("http") else f"https://{session.site}"
+            session.state = LoginState.WAITING_USER
+            session.expires_at = time.time() + 600
+            self._active[session.session_id] = session
+            return session
 
     async def status(self, session: LoginSession) -> LoginSession:
         """Check current auth status."""
