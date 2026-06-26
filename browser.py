@@ -93,15 +93,7 @@ class BrowserManager:
         await self._enforce_ephemeral_limit(session_id)
         await self._ensure_started()
 
-        ctx = await self._pool.open_ephemeral_context(
-            viewport={"width": 1280, "height": 900},
-            user_agent=(
-                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
-            ),
-            locale="en-US",
-            timezone_id="America/New_York",
-        )
+        ctx = await self._pool.open_ephemeral_context()
 
         cookie_file = SESSIONS_DIR / f"{session_id}.json"
         if cookie_file.exists():
