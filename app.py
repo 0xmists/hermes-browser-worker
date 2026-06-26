@@ -575,8 +575,13 @@ async def raw(req: Request):
 @app.post("/login/start", response_model=LoginStartResp)
 async def login_start(req: LoginStartReq):
     session_id = req.site.replace(".", "_").replace("/", "_")
-    result = await _manager.start_login(session_id, req.site)
-    return LoginStartResp(**result)
+    try:
+        result = await _manager.start_login(session_id, req.site)
+        return LoginStartResp(**result)
+    except Exception as e:
+        import traceback
+        _logger.error("login/start error: %s", traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/login/status/{session_id}", response_model=LoginStatusResp)
