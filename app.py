@@ -14,6 +14,12 @@ Endpoints:
     POST /cookies/load
     POST /close
     POST /raw
+    POST /login/start
+    GET  /login/status/{session_id}
+    POST /login/cancel
+    POST /session/list
+    POST /session/delete
+    POST /session/refresh
 """
 
 from __future__ import annotations
@@ -29,7 +35,8 @@ from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 from playwright.async_api import TimeoutError as PlaywrightTimeout
 
-from browser import BrowserManager, SESSIONS_DIR
+from browser import BrowserManager, SESSIONS_DIR, PROFILES_DIR
+from login_providers import StubLoginProvider
 
 port = int(os.getenv("PORT", 8080))
 API_KEY = os.getenv("API_KEY", "")
@@ -44,6 +51,7 @@ app = FastAPI(
 _logger = logging.getLogger("browser-worker")
 
 _manager = BrowserManager(max_sessions=MAX_SESSIONS)
+_manager._login_provider = StubLoginProvider(_manager, PROFILES_DIR)
 
 
 # ──────────────────────────────────────────────
@@ -148,6 +156,25 @@ class FillReq(BaseModel):
     timeout_ms: int = 10000
     clear_first: bool = True
     wait_after_ms: int = 300
+
+
+class LoginStartReq(BaseModel):
+    site: str
+    expires_in: int = 600
+
+
+class LoginStartResp(BaseModel):
+    session_id: str
+    login_url: str
+    expires_in: int
+    state: str = "waiting_user"
+
+
+class LoginStatusResp(BaseModel):
+    session_id: str
+    state: str
+    authenticated: bool = False
+    login_url: Optional[str] = None
 
 
 # ──────────────────────────────────────────────
@@ -539,3 +566,70 @@ async def raw(req: Request):
         "chars": len(html),
         "elapsed_ms": int((time.time() - t0) * 1000),
     }
+
+
+# ──────────────────────────────────────────────
+#   Login flow (Phase 1)
+# ──────────────────────────────────────────────
+
+@app.post("/login/start", response_model=LoginStartResp)
+async def login_start(req: LoginStartReq):
+    session_id = req.site.replace(".", "_").replace("/", "_")
+    result = await _manager.start_login(session_id, req.site)
+    return LoginStartResp(**result)
+
+
+@app.get("/login/status/{session_id}", response_model=LoginStatusResp)
+async def _login_status(session_id: str):
+    session_data = await _manager.login_status(session_id)
+    if session_data is None:
+        raise HTTPException(status_code=404, detail="Login session not found")
+    return LoginStatusResp(**session_data)
+
+
+@app.post("/login/cancel")
+async def login_cancel(req: Request):
+    body = await req.body()
+    data = json.loads(body or b"{}")
+    session_id = data.get("session_id")
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id required")
+    result = await _manager.cancel_login(session_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Login session not found")
+    return {"ok": True, "session_id": session_id, "cancelled": True}
+
+
+@app.post("/session/list")
+async def session_list(req: Request):
+    body = await req.body()
+    data = json.loads(body or b"{}")
+    sessions = _manager.list_sessions()
+    return {"ok": True, "sessions": sessions, **data}
+
+
+@app.post("/session/delete")
+async def session_delete(req: Request):
+    body = await req.body()
+    data = json.loads(body or b"{}")
+    session_id = data.get("session_id")
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id required")
+    result = await _manager.delete_session(session_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {"ok": True, "session_id": session_id, "deleted": True}
+
+
+@app.post("/session/refresh")
+async def session_refresh(req: Request):
+    body = await req.body()
+    data = json.loads(body or b"{}")
+    session_id = data.get("session_id")
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id required")
+    try:
+        result = await _manager.refresh_session(session_id)
+    except RuntimeError:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    return result
