@@ -55,9 +55,11 @@ class BrowserPool:
     async def open_persistent_context(
         self, profile_dir: Path, **kwargs
     ) -> BrowserContext:
-        await self.start()
-        return await self._browser.new_context(  # type: ignore[union-attr]
-            user_data_dir=str(profile_dir),
+        # launch_persistent_context manages its own browser + playwright instance
+        if self._pw is None:
+            self._pw = await async_playwright().start()
+        return await self._pw.chromium.launch_persistent_context(
+            str(profile_dir),
             headless=True,
             viewport={"width": 1280, "height": 900},
             user_agent=(
