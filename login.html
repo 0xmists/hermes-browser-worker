@@ -96,15 +96,8 @@ html, body {
     const TOKEN = '__TOKEN_PLACEHOLDER__';
     const STREAM_URL = '/login-stream/' + TOKEN;
     const INPUT_URL = '/login-input/' + TOKEN;
-
-    let canvas, ctx;
-    let img = new Image();
-    let connected = false;
-    let touchActive = false;
-    let lastTouchPos = null;
-    let expiresAt = Date.now() + 600000;
-    let timerInterval = null;
-    let eventSource = null;
+    let pollActive = false;
+    let consecutiveErrors = 0;
 
     const $statusDot = document.getElementById('status-dot');
     const $statusText = document.getElementById('status-text');
@@ -175,33 +168,6 @@ html, body {
         setStatus('authenticated', 'Authenticated');
         $successOverlay.classList.add('show');
         if (timerInterval) clearInterval(timerInterval);
-    }
-
-    // Also try SSE (EventSource) — works if proxy doesn't buffer
-    try {
-        eventSource = new EventSource(STREAM_URL);
-        eventSource.onopen = function() {
-            connected = true;
-            setStatus('connected', 'Connected (SSE)');
-        };
-        eventSource.addEventListener('frame', function(event) {
-            try {
-                var msg = JSON.parse(event.data);
-                drawFrame(msg.data, msg.width, msg.height);
-            } catch (e) {}
-        });
-        eventSource.addEventListener('authenticated', function() {
-            onAuthenticated();
-            if (eventSource) eventSource.close();
-        });
-        eventSource.onerror = function() {
-            // Fall back to polling
-            eventSource.close();
-            startPolling();
-            setStatus('connected', 'Connected (polling)');
-        };
-    } catch (e) {
-        startPolling();
     }
 
     function sendInput(data) {
