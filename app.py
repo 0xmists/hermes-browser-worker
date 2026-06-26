@@ -578,14 +578,14 @@ async def raw(req: Request):
 # ──────────────────────────────────────────────
 
 @app.post("/login/start", response_model=LoginStartResp)
-async def login_start(req: LoginStartReq):
+async def login_start(req: LoginStartReq, request: Request):
     session_id = req.site.replace(".", "_").replace("/", "_")
     try:
         result = await _manager.start_login(session_id, req.site)
         resp = LoginStartResp(**result)
         if resp.connect_url and resp.connect_url.startswith("/ws"):
-            host = req.headers.get("host", "")
-            scheme = "wss" if req.url.scheme == "https" else "ws"
+            host = request.headers.get("host", "")
+            scheme = "wss" if request.url.scheme == "https" else "ws"
             resp.connect_url = f"{scheme}://{host}{resp.connect_url}"
         return resp
     except Exception as e:
