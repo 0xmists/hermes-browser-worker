@@ -638,7 +638,7 @@ async def login_page(token: str):
         html = f.read()
 
     # Inject the token into the page
-    html = html.replace("'__TOKE...ER__'", f"'{token}'")
+    html = html.replace("__TOKEN_PLACEHOLDER__", token)
 
     from fastapi.responses import HTMLResponse
     return HTMLResponse(content=html)
