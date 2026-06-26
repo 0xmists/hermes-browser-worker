@@ -146,6 +146,11 @@ class LoginViewerServer:
         if viewer is None or viewer.closed:
             return
 
+        # Ensure there's a page to capture
+        pages = viewer.context.pages
+        if not pages:
+            await viewer.context.new_page()
+
         viewer.screenshot_task = asyncio.create_task(
             self._capture_screenshots(viewer)
         )

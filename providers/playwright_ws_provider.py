@@ -46,10 +46,19 @@ class PlaywrightWSProvider(LoginProvider):
         try:
             await self.pm.ensure_profile(session.profile_name)
 
+            # Navigate to the site first so the browser has content
+            ctx = await self.pm.get_context(session.profile_name)
+            if ctx is None:
+                ctx = await self.pm.ensure_profile(session.profile_name)
+            pages = ctx.pages
+            page = pages[0] if pages else await ctx.new_page()
+            await page.goto(session.site if session.site.startswith("http") else f"https://{session.site}",
+                            wait_until="domcontentloaded", timeout=30000)
+
             viewer_server = get_viewer_server()
             token = await viewer_server.create_viewer(
                 session.session_id,
-                await self.pm.get_context(session.profile_name),
+                ctx,
                 ttl=600,
             )
 
