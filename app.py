@@ -586,10 +586,12 @@ async def login_start(req: LoginStartReq, request: Request):
     try:
         result = await _manager.start_login(session_id, req.site)
         resp = LoginStartResp(**result)
-        # Convert /login/{token} path to full https URL
+        # Convert /login/{token} path to full URL
         if resp.connect_url and resp.connect_url.startswith("/login/"):
             host = request.headers.get("host", "")
-            scheme = "https" if request.url.scheme == "https" else "http"
+            # Railway always serves HTTPS; respect X-Forwarded-Proto if present
+            scheme = request.headers.get("x-forwarded-proto",
+                                         "https" if request.url.scheme == "https" else "http")
             resp.connect_url = f"{scheme}://{host}{resp.connect_url}"
         return resp
     except Exception as e:
