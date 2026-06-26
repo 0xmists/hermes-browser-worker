@@ -665,13 +665,11 @@ async def login_stream(token: str):
         try:
             while viewer_server.validate_token(token):
                 try:
-                    # Wait for next frame with timeout (also checks token validity)
                     frame = await _asyncio.wait_for(
                         viewer._frame_queue.get(), timeout=2.0
                     )
                     yield f"event: frame\ndata: {_json.dumps(frame)}\n\n"
                 except _asyncio.TimeoutError:
-                    # Send a "ping" SSE comment to keep connection alive
                     yield ": ping\n\n"
         except GeneratorExit:
             pass
@@ -685,6 +683,63 @@ async def login_stream(token: str):
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@app.get("/login-frame/{token}")
+async def login_frame(token: str):
+    """Get the latest browser frame as JSON (for polling fallback)."""
+    from providers.playwright_ws import get_viewer_server
+    viewer_server = get_viewer_server()
+
+    if not viewer_server.validate_token(token):
+        raise HTTPException(status_code=404, detail="Invalid token")
+
+    viewer = viewer_server.get_viewer(token)
+    if viewer is None:
+        raise HTTPException(status_code=404, detail="Viewer not found")
+
+    await viewer_server.start_screenshot_stream(token)
+
+    import asyncio
+    frame = None
+    try:
+        frame = await asyncio.wait_for(viewer._frame_queue.get(), timeout=3.0)
+    except asyncio.TimeoutError:
+        pass
+
+    if frame is None:
+        return {"ok": False, "waiting": True}
+
+    return {"ok": True, **frame}
+
+
+@app.get("/login-wait/{token}")
+async def login_wait(token: str):
+    """Wait for next frame (long polling). Blocks until a frame is available."""
+    from providers.playwright_ws import get_viewer_server
+    viewer_server = get_viewer_server()
+
+    if not viewer_server.validate_token(token):
+        raise HTTPException(status_code=404, detail="Invalid token")
+
+    viewer = viewer_server.get_viewer(token)
+    if viewer is None:
+        raise HTTPException(status_code=404, detail="Viewer not found")
+
+    await viewer_server.start_screenshot_stream(token)
+
+    import asyncio
+    frame = None
+    # Wait up to 10 seconds for a frame
+    try:
+        frame = await asyncio.wait_for(viewer._frame_queue.get(), timeout=10.0)
+    except asyncio.TimeoutError:
+        pass
+
+    if frame is None:
+        return {"ok": False, "waiting": True}
+
+    return {"ok": True, **frame}
 
 
 @app.post("/login-input/{token}")

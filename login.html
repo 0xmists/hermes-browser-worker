@@ -130,57 +130,72 @@ html, body {
         $loading.style.display = 'none';
     }
 
-    // ─── SSE Connection ─────────────────────────────────────
-    function connect() {
-        if (eventSource) { eventSource.close(); }
+    // ─── Frame polling (works better through proxies) ───────
+    let lastFrameTime = 0;
+    let pollInterval = null;
 
+    function startPolling() {
+        if (pollInterval) return;
+        pollInterval = setInterval(fetchFrame, 200);
+    }
+
+    async function fetchFrame() {
+        try {
+            var resp = await fetch(STREAM_URL.replace("/login-stream/", "/login-frame/"));
+            var msg = await resp.json();
+            if (msg.ok && msg.data) {
+                drawFrame(msg.data, msg.width, msg.height);
+                if (msg.authenticated) {
+                    onAuthenticated();
+                }
+            } else if (msg.waiting) {
+                // No frame yet, try long polling instead
+                try {
+                    var resp2 = await fetch(STREAM_URL.replace("/login-stream/", "/login-wait/"));
+                    var msg2 = await resp2.json();
+                    if (msg2.ok && msg2.data) {
+                        drawFrame(msg2.data, msg2.width, msg2.height);
+                        if (msg2.authenticated) {
+                            onAuthenticated();
+                        }
+                    }
+                } catch (e2) {}
+            }
+        } catch (e) {}
+    }
+
+    function onAuthenticated() {
+        setStatus('authenticated', 'Authenticated');
+        $successOverlay.classList.add('show');
+        if (timerInterval) clearInterval(timerInterval);
+        if (pollInterval) clearInterval(pollInterval);
+    }
+
+    // Also try SSE (EventSource) — works if proxy doesn't buffer
+    try {
         eventSource = new EventSource(STREAM_URL);
-
         eventSource.onopen = function() {
             connected = true;
-            setStatus('connected', 'Connected');
+            setStatus('connected', 'Connected (SSE)');
         };
-
-        eventSource.onmessage = function(event) {
-            try { handleMessage(JSON.parse(event.data)); } catch (e) {}
-        };
-
         eventSource.addEventListener('frame', function(event) {
             try {
                 var msg = JSON.parse(event.data);
                 drawFrame(msg.data, msg.width, msg.height);
             } catch (e) {}
         });
-
-        eventSource.addEventListener('authenticated', function(event) {
-            setStatus('authenticated', 'Authenticated');
-            $successOverlay.classList.add('show');
-            if (timerInterval) clearInterval(timerInterval);
-            if (eventSource) { eventSource.close(); }
+        eventSource.addEventListener('authenticated', function() {
+            onAuthenticated();
+            if (eventSource) eventSource.close();
         });
-
         eventSource.onerror = function() {
-            connected = false;
-            setStatus('disconnected', 'Disconnected. Reconnecting...');
-            // EventSource auto-reconnects
+            // Fall back to polling
+            eventSource.close();
+            startPolling();
+            setStatus('connected', 'Connected (polling)');
         };
-    }
-
-    function handleMessage(msg) {
-        switch (msg.type) {
-            case 'authenticated':
-                setStatus('authenticated', 'Authenticated');
-                $successOverlay.classList.add('show');
-                if (timerInterval) clearInterval(timerInterval);
-                if (eventSource) { eventSource.close(); }
-                break;
-            case 'expired':
-                setStatus('expired', 'Session expired');
-                break;
-            case 'error':
-                setStatus('error', msg.message || 'Error');
-                break;
-        }
+    } catch (e) {
+        startPolling();
     }
 
     function sendInput(data) {
@@ -313,8 +328,32 @@ html, body {
 
     // ─── Init ──────────────────────────────────────────────
     initCanvas();
-    connect();
     startTimer();
+    // Try SSE first, fall back to polling
+    try {
+        eventSource = new EventSource(STREAM_URL);
+        eventSource.onopen = function() {
+            connected = true;
+            setStatus('connected', 'Connected (SSE)');
+        };
+        eventSource.addEventListener('frame', function(event) {
+            try {
+                var msg = JSON.parse(event.data);
+                drawFrame(msg.data, msg.width, msg.height);
+            } catch (e) {}
+        });
+        eventSource.addEventListener('authenticated', function() {
+            onAuthenticated();
+            eventSource.close();
+        });
+        eventSource.onerror = function() {
+            eventSource.close();
+            startPolling();
+            setStatus('connected', 'Connected (polling)');
+        };
+    } catch (e) {
+        startPolling();
+    }
 
     window.addEventListener('beforeunload', function() {
         if (eventSource) eventSource.close();
