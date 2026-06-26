@@ -15,6 +15,8 @@ Endpoints:
     POST /close
     POST /raw
     POST /login/start
+    GET  /login/{token}          → Login page (browser viewer)
+    WS   /login-ws/{token}        → Viewer WebSocket relay
     GET  /login/status/{session_id}
     POST /login/authenticate
     POST /login/cancel
@@ -32,7 +34,7 @@ import time
 import logging
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 from playwright.async_api import TimeoutError as PlaywrightTimeout
 
@@ -582,9 +584,10 @@ async def login_start(req: LoginStartReq, request: Request):
     try:
         result = await _manager.start_login(session_id, req.site)
         resp = LoginStartResp(**result)
-        if resp.connect_url and resp.connect_url.startswith("/ws"):
+        # Convert /login/{token} path to full https URL
+        if resp.connect_url and resp.connect_url.startswith("/login/"):
             host = request.headers.get("host", "")
-            scheme = "wss" if request.url.scheme == "https" else "ws"
+            scheme = "https" if request.url.scheme == "https" else "http"
             resp.connect_url = f"{scheme}://{host}{resp.connect_url}"
         return resp
     except Exception as e:
@@ -617,6 +620,56 @@ async def login_authenticate(request: Request):
     if not result:
         raise HTTPException(status_code=404, detail="Session not found")
     return {"ok": True, "session_id": session_id, "authenticated": True}
+
+
+@app.get("/login/{token}")
+async def login_page(token: str):
+    """Serve the browser login page."""
+    from providers.playwright_ws import get_viewer_server
+    viewer_server = get_viewer_server()
+
+    if not viewer_server.validate_token(token):
+        raise HTTPException(status_code=404, detail="Login token not found or expired")
+
+    # Read login.html and inject the token
+    import os
+    html_path = os.path.join(os.path.dirname(__file__), "login.html")
+    with open(html_path, "r") as f:
+        html = f.read()
+
+    # Inject the token into the page
+    html = html.replace("'__TOKE...ER__'", f"'{token}'")
+
+    from fastapi.responses import HTMLResponse
+    return HTMLResponse(content=html)
+
+
+@app.websocket("/login-ws/{token}")
+async def login_websocket(websocket: WebSocket, token: str):
+    """WebSocket relay for browser viewer."""
+    from providers.playwright_ws import get_viewer_server
+    viewer_server = get_viewer_server()
+
+    if not viewer_server.validate_token(token):
+        await websocket.close(code=4001, reason="Invalid token")
+        return
+
+    await websocket.accept()
+
+    viewer = await viewer_server.connect_ws(token, websocket)
+    if viewer is None:
+        await websocket.close(code=4001, reason="Viewer not found")
+        return
+
+    try:
+        while True:
+            data = await websocket.receive_json()
+            await viewer_server.handle_client_message(token, data)
+    except WebSocketDisconnect:
+        await viewer_server.disconnect_ws(token)
+    except Exception as e:
+        _logger.error("WebSocket error for token %s: %s", token[:8], e)
+        await viewer_server.disconnect_ws(token)
 
 
 @app.post("/login/cancel")

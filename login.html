@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Hermes Login Viewer</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body {
+    width: 100%; height: 100%; overflow: hidden;
+    background: #000; color: #e7e9ea;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    touch-action: none; user-select: none;
+}
+#app {
+    display: flex; flex-direction: column;
+    width: 100vw; height: 100vh; height: 100dvh;
+}
+#status-bar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 8px 16px; background: #16181c; border-bottom: 1px solid #2f3336;
+    font-size: 13px; z-index: 10; flex-shrink: 0;
+}
+#status-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: #ffd700; display: inline-block; margin-right: 6px;
+}
+#status-dot.connected { background: #00ba7c; }
+#status-dot.authenticated { background: #1d9bf0; }
+#status-text { flex: 1; }
+#timer { color: #71767b; font-variant-numeric: tabular-nums; }
+#canvas-wrap {
+    flex: 1; display: flex; align-items: center; justify-content: center;
+    overflow: hidden; position: relative; background: #000;
+}
+#browser-canvas {
+    max-width: 100%; max-height: 100%;
+    image-rendering: auto; cursor: default;
+    touch-action: none;
+}
+#input-layer {
+    position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+    z-index: 5; cursor: inherit;
+}
+#loading {
+    position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    text-align: center; color: #71767b; font-size: 14px;
+}
+#loading .spinner {
+    width: 32px; height: 32px; border: 3px solid #2f3336;
+    border-top-color: #1d9bf0; border-radius: 50%;
+    animation: spin 0.8s linear infinite; margin: 0 auto 12px;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+#success-overlay {
+    position: absolute; inset: 0; display: none;
+    align-items: center; justify-content: center;
+    background: rgba(0,0,0,0.8); z-index: 20;
+}
+#success-overlay.show { display: flex; }
+#success-card {
+    background: #16181c; border: 1px solid #2f3336; border-radius: 16px;
+    padding: 32px; text-align: center; max-width: 300px;
+}
+#success-card h2 { color: #00ba7c; margin-bottom: 8px; }
+#success-card p { color: #71767b; font-size: 14px; }
+</style>
+</head>
+<body>
+<div id="app">
+    <div id="status-bar">
+        <span id="status-dot"></span>
+        <span id="status-text">Connecting...</span>
+        <span id="timer">--</span>
+    </div>
+    <div id="canvas-wrap">
+        <canvas id="browser-canvas"></canvas>
+        <div id="input-layer"></div>
+        <div id="loading">
+            <div class="spinner"></div>
+            <div>Loading browser...</div>
+        </div>
+        <div id="success-overlay">
+            <div id="success-card">
+                <h2>Authenticated</h2>
+                <p>Login successful. You can close this tab.</p>
+            </div>
+        </div>
+    </div>
+</div>
+<script>
+(function() {
+    'use strict';
+
+    // Token injected by server
+    const TOKEN = '__TOKEN_PLACEHOLDER__';
+    const IS_HTTPS = window.location.protocol === 'https:';
+    const WS_URL = (IS_HTTPS ? 'wss' : 'ws') + '://' + window.location.host + '/login-ws/' + TOKEN;
+
+    let ws = null;
+    let canvas, ctx;
+    let img = new Image();
+    let connected = false;
+    let touchActive = false;
+    let lastTouchPos = null;
+    let expiresAt = Date.now() + 600000;
+    let timerInterval = null;
+
+    const $statusDot = document.getElementById('status-dot');
+    const $statusText = document.getElementById('status-text');
+    const $timer = document.getElementById('timer');
+    const $loading = document.getElementById('loading');
+    const $successOverlay = document.getElementById('success-overlay');
+    const $canvasWrap = document.getElementById('canvas-wrap');
+
+    function initCanvas() {
+        canvas = document.getElementById('browser-canvas');
+        ctx = canvas.getContext('2d');
+    }
+
+    function drawFrame(imageData, width, height) {
+        canvas.width = width;
+        canvas.height = height;
+        const wrapRect = $canvasWrap.getBoundingClientRect();
+        const scale = Math.min(wrapRect.width / width, wrapRect.height / height);
+        canvas.style.width = Math.floor(width * scale) + 'px';
+        canvas.style.height = Math.floor(height * scale) + 'px';
+        img.onload = function() { ctx.drawImage(img, 0, 0, width, height); };
+        img.src = 'data:image/jpeg;base64,' + imageData;
+        $loading.style.display = 'none';
+    }
+
+    function connect() {
+        try { ws = new WebSocket(WS_URL); }
+        catch (e) { setStatus('error', 'Failed to connect'); return; }
+
+        ws.onopen = function() {
+            connected = true;
+            setStatus('connected', 'Connected');
+        };
+
+        ws.onmessage = function(event) {
+            try { handleMessage(JSON.parse(event.data)); } catch (e) {}
+        };
+
+        ws.onclose = function() {
+            connected = false;
+            setStatus('disconnected', 'Disconnected. Reconnecting...');
+            setTimeout(function() { if (!connected) connect(); }, 2000);
+        };
+
+        ws.onerror = function() { ws.close(); };
+    }
+
+    function handleMessage(msg) {
+        switch (msg.type) {
+            case 'frame':
+                drawFrame(msg.data, msg.width, msg.height);
+                break;
+            case 'authenticated':
+                setStatus('authenticated', 'Authenticated');
+                $successOverlay.classList.add('show');
+                if (timerInterval) clearInterval(timerInterval);
+                setTimeout(function() { if (ws) ws.close(); }, 3000);
+                break;
+            case 'expired':
+                setStatus('expired', 'Session expired');
+                break;
+            case 'error':
+                setStatus('error', msg.message || 'Error');
+                break;
+        }
+    }
+
+    function sendCmd(data) {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify(data));
+        }
+    }
+
+    function setStatus(state, text) {
+        $statusDot.className = '';
+        if (state === 'connected' || state === 'authenticated') {
+            $statusDot.classList.add(state);
+        }
+        $statusText.textContent = text;
+    }
+
+    function startTimer() {
+        timerInterval = setInterval(function() {
+            var remaining = Math.max(0, Math.floor((expiresAt - Date.now()) / 1000));
+            var min = Math.floor(remaining / 60);
+            var sec = remaining % 60;
+            $timer.textContent = min + ':' + sec.toString().padStart(2, '0');
+            if (remaining <= 0) { clearInterval(timerInterval); $timer.textContent = 'Expired'; }
+        }, 1000);
+    }
+
+    // ─── Mouse ──────────────────────────────────────────────
+    document.addEventListener('mousedown', function(e) {
+        var pos = getCanvasCoords(e.clientX, e.clientY);
+        sendCmd({ type: 'mouse', x: pos.x, y: pos.y, action: 'down', button: e.button });
+    });
+    document.addEventListener('mousemove', function(e) {
+        var pos = getCanvasCoords(e.clientX, e.clientY);
+        sendCmd({ type: 'mouse', x: pos.x, y: pos.y, action: 'move', button: e.button });
+    });
+    document.addEventListener('mouseup', function(e) {
+        var pos = getCanvasCoords(e.clientX, e.clientY);
+        sendCmd({ type: 'mouse', x: pos.x, y: pos.y, action: 'up', button: e.button });
+    });
+
+    var lastClickTime = 0, lastClickPos = null;
+    canvas.addEventListener('click', function(e) {
+        var now = Date.now();
+        var pos = getCanvasCoords(e.clientX, e.clientY);
+        if (lastClickPos && now - lastClickTime < 300 &&
+            Math.abs(pos.x - lastClickPos.x) < 0.02 &&
+            Math.abs(pos.y - lastClickPos.y) < 0.02) {
+            sendCmd({ type: 'mouse', x: pos.x, y: pos.y, action: 'click', button: 0 });
+            lastClickTime = 0;
+        } else {
+            sendCmd({ type: 'mouse', x: pos.x, y: pos.y, action: 'down', button: 0 });
+            sendCmd({ type: 'mouse', x: pos.x, y: pos.y, action: 'up', button: 0 });
+            lastClickTime = now;
+            lastClickPos = pos;
+        }
+    });
+
+    // ─── Wheel ──────────────────────────────────────────────
+    document.addEventListener('wheel', function(e) {
+        e.preventDefault();
+        sendCmd({ type: 'wheel', dx: e.deltaX, dy: e.deltaY });
+    }, { passive: false });
+
+    // ─── Keyboard ───────────────────────────────────────────
+    document.addEventListener('keydown', function(e) {
+        if (['Shift', 'Control', 'Alt', 'Meta'].includes(e.key)) return;
+        sendCmd({ type: 'key', key: e.key, code: e.code, modifiers: getModifiers(e) });
+        if (e.key.length === 1 || e.key === 'Backspace') {
+            e.preventDefault();
+            sendCmd({ type: 'type', text: e.key });
+        }
+    });
+
+    function getModifiers(e) {
+        var mods = 0;
+        if (e.altKey) mods |= 1;
+        if (e.ctrlKey) mods |= 2;
+        if (e.metaKey) mods |= 4;
+        if (e.shiftKey) mods |= 8;
+        return mods;
+    }
+
+    // ─── Touch ──────────────────────────────────────────────
+    var inputLayer = document.getElementById('input-layer');
+    var touchStartY = 0;
+
+    inputLayer.addEventListener('touchstart', function(e) {
+        e.preventDefault();
+        if (e.touches.length === 1) {
+            touchActive = true;
+            touchStartY = e.touches[0].clientY;
+            var pos = getCanvasCoords(e.touches[0].clientX, e.touches[0].clientY);
+            sendCmd({ type: 'mouse', x: pos.x, y: pos.y, action: 'down', button: 0 });
+            lastTouchPos = pos;
+        }
+    }, { passive: false });
+
+    inputLayer.addEventListener('touchmove', function(e) {
+        e.preventDefault();
+        if (!touchActive || e.touches.length !== 1) return;
+        var touch = e.touches[0];
+        var pos = getCanvasCoords(touch.clientX, touch.clientY);
+        sendCmd({ type: 'mouse', x: pos.x, y: pos.y, action: 'move', button: 0 });
+        // Scroll detection
+        var dy = touchStartY - touch.clientY;
+        if (Math.abs(dy) > 10) {
+            sendCmd({ type: 'wheel', dx: 0, dy: dy * 2 });
+            touchStartY = touch.clientY;
+        }
+        lastTouchPos = pos;
+    }, { passive: false });
+
+    inputLayer.addEventListener('touchend', function(e) {
+        e.preventDefault();
+        touchActive = false;
+        if (lastTouchPos) {
+            sendCmd({ type: 'mouse', x: lastTouchPos.x, y: lastTouchPos.y, action: 'up', button: 0 });
+        }
+    }, { passive: false });
+
+    // ─── Helpers ────────────────────────────────────────────
+    function getCanvasCoords(clientX, clientY) {
+        var rect = canvas.getBoundingClientRect();
+        return {
+            x: (clientX - rect.left) / rect.width,
+            y: (clientY - rect.top) / rect.height
+        };
+    }
+
+    // ─── Init ──────────────────────────────────────────────
+    initCanvas();
+    connect();
+    startTimer();
+
+    window.addEventListener('beforeunload', function() { if (ws) ws.close(); });
+})();
+</script>
+</body>
+</html>
