@@ -37,7 +37,6 @@ from pydantic import BaseModel, Field
 from playwright.async_api import TimeoutError as PlaywrightTimeout
 
 from browser import BrowserManager, SESSIONS_DIR, PROFILES_DIR
-from login_providers import LoginProvider, StubLoginProvider
 from providers.playwright_ws_provider import PlaywrightWSProvider
 
 port = int(os.getenv("PORT", 8080))
