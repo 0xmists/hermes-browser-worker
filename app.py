@@ -36,7 +36,7 @@ from pydantic import BaseModel, Field
 from playwright.async_api import TimeoutError as PlaywrightTimeout
 
 from browser import BrowserManager, SESSIONS_DIR, PROFILES_DIR
-from login_providers import StubLoginProvider
+from login_providers import LoginProvider, StubLoginProvider
 
 port = int(os.getenv("PORT", 8080))
 API_KEY = os.getenv("API_KEY", "")
@@ -51,7 +51,7 @@ app = FastAPI(
 _logger = logging.getLogger("browser-worker")
 
 _manager = BrowserManager(max_sessions=MAX_SESSIONS)
-_manager._login_provider = StubLoginProvider(_manager, PROFILES_DIR)
+_manager._logins._provider = StubLoginProvider(_manager._profiles, PROFILES_DIR)
 
 
 # ──────────────────────────────────────────────

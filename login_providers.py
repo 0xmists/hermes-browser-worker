@@ -57,14 +57,14 @@ class LoginProvider(ABC):
 class StubLoginProvider(LoginProvider):
     """Default provider: launches persistent profile, returns site URL."""
 
-    def __init__(self, browser_manager, profiles_dir: Path):
-        self.bm = browser_manager
+    def __init__(self, profile_manager, profiles_dir: Path):
+        self.pm = profile_manager
         self.profiles_dir = profiles_dir
         self._sessions: dict[str, LoginSession] = {}
 
     async def start(self, profile_name: str, site: str) -> LoginSession:
         session_id = profile_name
-        await self.bm._ensure_profile(profile_name)
+        await self.pm.ensure_profile(profile_name)
         meta = {"site": site, "created_at": time.time()}
         (self.profiles_dir / session_id / "meta.json").write_text(
             json.dumps(meta)
@@ -85,10 +85,10 @@ class StubLoginProvider(LoginProvider):
     async def cancel(self, session_id: str) -> bool:
         session = self._sessions.pop(session_id, None)
         if session:
-            await self.bm.close_profile(session.profile_name)
+            await self.pm.close_profile(session.profile_name)
             return True
         return False
 
     async def cleanup(self, session_id: str) -> None:
         self._sessions.pop(session_id, None)
-        await self.bm.close_profile(session_id)
+        await self.pm.close_profile(session_id)
