@@ -572,16 +572,29 @@ async def raw(req: Request):
 #   Login flow (Phase 1)
 # ──────────────────────────────────────────────
 
+@app.get("/debug/persistent-test")
+async def debug_persistent_test():
+    """Test persistent context creation directly."""
+    from pathlib import Path
+    import tempfile
+    profile_dir = Path(tempfile.mkdtemp())
+    try:
+        ctx = await _manager._pool.open_persistent_context(profile_dir)
+        page = await ctx.new_page()
+        await page.goto("https://example.com")
+        title = await page.title()
+        await ctx.close()
+        return {"ok": True, "title": title, "profile_dir": str(profile_dir)}
+    except Exception as e:
+        import traceback
+        return {"ok": False, "error": str(e), "trace": traceback.format_exc()}
+
+
 @app.post("/login/start", response_model=LoginStartResp)
 async def login_start(req: LoginStartReq):
     session_id = req.site.replace(".", "_").replace("/", "_")
-    try:
-        result = await _manager.start_login(session_id, req.site)
-        return LoginStartResp(**result)
-    except Exception as e:
-        import traceback
-        _logger.error("login/start error: %s", traceback.format_exc())
-        raise HTTPException(status_code=500, detail=str(e))
+    result = await _manager.start_login(session_id, req.site)
+    return LoginStartResp(**result)
 
 
 @app.get("/login/status/{session_id}", response_model=LoginStatusResp)
