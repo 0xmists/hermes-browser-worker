@@ -73,7 +73,7 @@ class StubLoginProvider(LoginProvider):
             session_id=session_id,
             profile_name=profile_name,
             state=LoginState.WAITING_USER,
-            login_url=f"https://{site}",
+            login_url=site if site.startswith("http") else f"https://{site}",
             expires_at=time.time() + 600,
         )
         self._sessions[session_id] = session
