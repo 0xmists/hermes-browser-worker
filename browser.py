@@ -30,7 +30,12 @@ from playwright.async_api import (
     async_playwright,
 )
 from playwright.async_api import TimeoutError as PlaywrightTimeout
-from playwright_stealth import stealth_async
+
+# playwright-stealth is optional; if it's missing or API differs we just skip stealth.
+try:  # pragma: no cover - optional dependency
+    from playwright_stealth import stealth_async  # type: ignore
+except Exception:  # noqa: BLE001
+    stealth_async = None  # type: ignore[assignment]
 
 SESSIONS_DIR = Path(os.getenv("SESSIONS_DIR", "/app/sessions"))
 SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
@@ -160,11 +165,12 @@ class BrowserManager:
         self._pages.setdefault(session_id, {})
         self._session_created[session_id] = time.time()
 
-        # Apply evasion patches against headless detection
-        try:
-            await stealth_async(ctx)
-        except Exception:
-            pass
+        # Apply evasion patches against headless detection (best-effort)
+        if stealth_async is not None:
+            try:
+                await stealth_async(ctx)
+            except Exception:
+                pass
 
         return ctx, True
 

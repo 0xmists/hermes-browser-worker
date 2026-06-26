@@ -1,7 +1,6 @@
 fastapi
 uvicorn[standard]
 playwright
-playwright-stealth
 beautifulsoup4
 httpx
 python-multipart
