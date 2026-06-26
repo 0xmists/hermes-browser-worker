@@ -72,6 +72,10 @@ class BrowserManager:
             return True
         return self._profiles.profile_exists(session_id)
 
+    @property
+    def is_ready(self) -> bool:
+        return self._pool._browser is not None
+
     # ─────────────────────────────────────────────
     #  Ephemeral contexts
     # ─────────────────────────────────────────────

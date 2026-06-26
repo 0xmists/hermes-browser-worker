@@ -191,7 +191,7 @@ async def _shutdown():
 
 @app.get("/health")
 async def health():
-    state = "ready" if _manager._browser else "starting"
+    state = "ready" if _manager.is_ready else "starting"
     return {"status": state, "timestamp": time.time()}
 
 
