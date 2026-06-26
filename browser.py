@@ -19,10 +19,11 @@ from playwright.async_api import (
 from playwright.async_api import TimeoutError as PlaywrightTimeout
 
 from browser_pool import BrowserPool
-from login_providers import LoginProvider, LoginState
+from login_providers import LoginProvider, LoginSession, LoginState
 from login_manager import LoginManager
 from profile_manager import ProfileManager
 from session_manager import Session, SessionManager
+from auth_detectors import AuthDetectorRegistry
 
 try:
     from playwright_stealth import stealth_async  # type: ignore
@@ -44,7 +45,9 @@ class BrowserManager:
         self._pool = BrowserPool()
         self._profiles = ProfileManager(self._pool, PROFILES_DIR, login_provider=login_provider)
         self._sessions = SessionManager(self._profiles)
-        self._logins = LoginManager(self._profiles, login_provider)
+        self._auth_registry = AuthDetectorRegistry()
+        self._auth_registry.register_defaults()
+        self._logins = LoginManager(self._profiles, login_provider, auth_registry=self._auth_registry)
 
         # Ephemeral state lives here (not in Profile/Session/Login managers)
         self._ephemeral_contexts: Dict[str, BrowserContext] = {}
@@ -215,10 +218,18 @@ class BrowserManager:
     # ─────────────────────────────────────────────
 
     async def start_login(self, profile_name: str, site: str) -> dict:
+        """
+        Start a login session:
+        1. Create LoginSession
+        2. Provider exposes transport (WebSocket, CDP, etc.)
+        3. Auth detector monitors for authentication
+        4. Return connect_url for client to attach
+        """
         session = await self._logins.start(site, session_id=profile_name)
         return {
             "session_id": session.session_id,
             "login_url": session.login_url,
+            "connect_url": session.connect_url,
             "expires_in": int(session.expires_at - time.time()) if session.expires_at else 600,
             "state": session.state.value,
         }
@@ -229,13 +240,18 @@ class BrowserManager:
             return {
                 "session_id": session.session_id,
                 "state": session.state.value,
-                "authenticated": session.state.value == LoginState.AUTHENTICATED.value,
+                "authenticated": session.state == LoginState.AUTHENTICATED,
                 "login_url": session.login_url,
+                "connect_url": session.connect_url,
             }
         return None
 
     async def cancel_login(self, session_id: str) -> bool:
         return await self._logins.cancel(session_id)
+
+    def force_authenticate(self, session_id: str) -> bool:
+        """Manually mark a session as authenticated (for ManualDetector)."""
+        return self._logins.force_authenticate(session_id)
 
     # ─────────────────────────────────────────────
     #  Session management

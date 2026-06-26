@@ -67,6 +67,10 @@ class ProfileManager:
             pass
         self._locks.pop(profile_name, None)
 
+    async def get_context(self, profile_name: str) -> Optional[BrowserContext]:
+        """Get the active browser context for a profile, or None."""
+        return self._contexts.get(profile_name)
+
     async def get_page(self, profile_name: str, page_id: str = "main") -> Page:
         ctx = await self.ensure_profile(profile_name)
         pages = self._pages[profile_name]

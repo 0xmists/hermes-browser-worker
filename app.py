@@ -16,6 +16,7 @@ Endpoints:
     POST /raw
     POST /login/start
     GET  /login/status/{session_id}
+    POST /login/authenticate
     POST /login/cancel
     POST /session/list
     POST /session/delete
@@ -37,6 +38,7 @@ from playwright.async_api import TimeoutError as PlaywrightTimeout
 
 from browser import BrowserManager, SESSIONS_DIR, PROFILES_DIR
 from login_providers import LoginProvider, StubLoginProvider
+from providers.playwright_ws_provider import PlaywrightWSProvider
 
 port = int(os.getenv("PORT", 8080))
 API_KEY = os.getenv("API_KEY", "")
@@ -51,7 +53,8 @@ app = FastAPI(
 _logger = logging.getLogger("browser-worker")
 
 _manager = BrowserManager(max_sessions=MAX_SESSIONS)
-_manager._logins._provider = StubLoginProvider(_manager._profiles, PROFILES_DIR)
+_ws_provider = PlaywrightWSProvider(_manager._profiles, PROFILES_DIR)
+_manager._logins._provider = _ws_provider
 
 
 # ──────────────────────────────────────────────
@@ -166,8 +169,10 @@ class LoginStartReq(BaseModel):
 class LoginStartResp(BaseModel):
     session_id: str
     login_url: str
+    connect_url: Optional[str] = None
     expires_in: int
     state: str = "waiting_user"
+    authenticated: bool = False
 
 
 class LoginStatusResp(BaseModel):
@@ -175,6 +180,7 @@ class LoginStatusResp(BaseModel):
     state: str
     authenticated: bool = False
     login_url: Optional[str] = None
+    connect_url: Optional[str] = None
 
 
 # ──────────────────────────────────────────────
@@ -199,7 +205,6 @@ async def health():
 #   Core endpoints
 # ──────────────────────────────────────────────
 
-@app.post("/browse")
 @app.post("/browse")
 async def browse(req: BrowseReq):
     t0 = time.time()
@@ -576,7 +581,13 @@ async def raw(req: Request):
 async def login_start(req: LoginStartReq):
     session_id = req.site.replace(".", "_").replace("/", "_")
     result = await _manager.start_login(session_id, req.site)
-    return LoginStartResp(**result)
+    # Build full connect_url with host if transport is available
+    resp = LoginStartResp(**result)
+    if resp.connect_url and resp.connect_url.startswith("/ws"):
+        host = req.headers.get("host", "")
+        scheme = "wss" if req.url.scheme == "https" else "ws"
+        resp.connect_url = f"{scheme}://{host}{resp.connect_url}"
+    return resp
 
 
 @app.get("/login/status/{session_id}", response_model=LoginStatusResp)
@@ -584,7 +595,25 @@ async def _login_status(session_id: str):
     session_data = await _manager.login_status(session_id)
     if session_data is None:
         raise HTTPException(status_code=404, detail="Login session not found")
-    return LoginStatusResp(**session_data)
+    resp = LoginStatusResp(**session_data)
+    if resp.connect_url and resp.connect_url.startswith("/ws"):
+        # Rebuild connect_url on status check (token may have been regenerated)
+        pass
+    return resp
+
+
+@app.post("/login/authenticate")
+async def login_authenticate(request: Request):
+    """Manually mark a session as authenticated (for ManualDetector flow)."""
+    body = await request.body()
+    data = json.loads(body or b"{}")
+    session_id = data.get("session_id")
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id required")
+    result = _manager.force_authenticate(session_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {"ok": True, "session_id": session_id, "authenticated": True}
 
 
 @app.post("/login/cancel")

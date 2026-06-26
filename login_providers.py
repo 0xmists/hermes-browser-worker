@@ -1,8 +1,13 @@
 """
-LoginProvider abstraction for Browser Worker login flows.
+login_providers.py — transport-agnostic login provider interface.
 
-Transport-agnostic interface. Implementations: stub, CDP, noVNC, Browserless, etc.
-Changing remote viewing technology requires changing only this file.
+The Browser Worker never depends on any specific transport (CDP, noVNC,
+WebSocket, WebRTC, etc.). It talks only to LoginProvider.
+
+Phase 2 changes:
+  - LoginProvider uses session objects (not profile_name + site)
+  - AuthDetector strategy pattern for authentication detection
+  - Transport lifecycle (expose/close) is owned by the provider
 """
 from __future__ import annotations
 
@@ -12,8 +17,15 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
+if TYPE_CHECKING:
+    from auth_detectors import AuthDetector
+
+
+# ──────────────────────────────────────────────
+#  Session state
+# ──────────────────────────────────────────────
 
 class LoginState(str, Enum):
     PENDING = "pending"
@@ -25,70 +37,103 @@ class LoginState(str, Enum):
 
 @dataclass
 class LoginSession:
+    """A login session: ties a profile to a transport + auth state."""
     session_id: str
     profile_name: str
     state: LoginState
-    login_url: Optional[str] = None
+    site: str
+    login_url: str = ""
+    connect_url: Optional[str] = None
     expires_at: Optional[float] = None
     created_at: float = field(default_factory=time.time)
     authenticated_at: Optional[float] = None
+    transport_id: Optional[str] = None
+    metadata: dict = field(default_factory=dict)
 
+
+# ──────────────────────────────────────────────
+#  LoginProvider interface
+# ──────────────────────────────────────────────
 
 class LoginProvider(ABC):
-    """Transport-agnostic login provider."""
+    """
+    Transport-agnostic login provider.
+
+    Implementations:
+      - PlaywrightWSProvider (Phase 2)
+      - CDPProvider (future)
+      - NoVNCProvider (future)
+      - BrowserlessProvider (future)
+    """
 
     @abstractmethod
-    async def start(self, profile_name: str, site: str) -> LoginSession:
+    async def start(self, session: LoginSession, auth_detector: Optional[AuthDetector] = None) -> LoginSession:
+        """
+        Start a login session:
+        1. Create/open persistent profile
+        2. Expose transport (WebSocket URL, CDP endpoint, etc.)
+        3. Return updated session with connect_url
+        """
         raise NotImplementedError
 
     @abstractmethod
-    async def status(self, session_id: str) -> Optional[LoginSession]:
+    async def status(self, session: LoginSession) -> LoginSession:
+        """
+        Check authentication status.
+        Returns updated session (possibly with state=AUTHENTICATED).
+        """
         raise NotImplementedError
 
     @abstractmethod
-    async def cancel(self, session_id: str) -> bool:
+    async def stop(self, session: LoginSession) -> None:
+        """
+        Stop login: close transport, but do NOT destroy the profile.
+        The profile/context survive for later reuse.
+        """
         raise NotImplementedError
 
-    @abstractmethod
-    async def cleanup(self, session_id: str) -> None:
-        raise NotImplementedError
+    async def cleanup(self, session: LoginSession) -> None:
+        """
+        Full cleanup: stop login + destroy profile.
+        Default implementation calls stop(). Override for more cleanup.
+        """
+        await self.stop(session)
 
+
+# ──────────────────────────────────────────────
+#  Stub provider (for testing / fallback)
+# ──────────────────────────────────────────────
 
 class StubLoginProvider(LoginProvider):
-    """Default provider: launches persistent profile, returns site URL."""
+    """
+    Default provider for Phase 1 compatibility.
+    Creates persistent profile, returns site URL as connect_url.
+    Does not actually expose a transport — useful for direct browser automation.
+    """
 
     def __init__(self, profile_manager, profiles_dir: Path):
         self.pm = profile_manager
         self.profiles_dir = profiles_dir
         self._sessions: dict[str, LoginSession] = {}
 
-    async def start(self, profile_name: str, site: str) -> LoginSession:
-        session_id = profile_name
-        await self.pm.ensure_profile(profile_name)
-        meta = {"site": site, "created_at": time.time()}
-        (self.profiles_dir / session_id / "meta.json").write_text(
-            json.dumps(meta)
-        )
-        session = LoginSession(
-            session_id=session_id,
-            profile_name=profile_name,
-            state=LoginState.WAITING_USER,
-            login_url=site if site.startswith("http") else f"https://{site}",
-            expires_at=time.time() + 600,
-        )
-        self._sessions[session_id] = session
+    async def start(self, session: LoginSession, auth_detector: Optional[AuthDetector] = None) -> LoginSession:
+        await self.pm.ensure_profile(session.profile_name)
+        session.login_url = session.site if session.site.startswith("http") else f"https://{session.site}"
+        session.connect_url = session.login_url
+        session.state = LoginState.WAITING_USER
+        session.expires_at = time.time() + 600
+        self._sessions[session.session_id] = session
         return session
 
-    async def status(self, session_id: str) -> Optional[LoginSession]:
-        return self._sessions.get(session_id)
+    async def status(self, session: LoginSession) -> LoginSession:
+        stored = self._sessions.get(session.session_id)
+        if stored:
+            return stored
+        return session
 
-    async def cancel(self, session_id: str) -> bool:
-        session = self._sessions.pop(session_id, None)
-        if session:
-            await self.pm.close_profile(session.profile_name)
-            return True
-        return False
+    async def stop(self, session: LoginSession) -> None:
+        self._sessions.pop(session.session_id, None)
 
-    async def cleanup(self, session_id: str) -> None:
-        self._sessions.pop(session_id, None)
-        await self.pm.close_profile(session_id)
+    async def cleanup(self, session: LoginSession) -> None:
+        self._sessions.pop(session.session_id, None)
+        await self.pm.close_profile(session.profile_name)
