@@ -659,15 +659,20 @@ async def login_stream(token: str):
         import json as _json
         import asyncio as _asyncio
 
-        # Start screenshot capture
+        # Start screenshot capture (idempotent — keeps running across reconnects)
         await viewer_server.start_screenshot_stream(token)
 
         try:
             while viewer_server.validate_token(token):
-                frame = getattr(viewer, "_latest_frame", None)
-                if frame:
+                try:
+                    # Wait for next frame with timeout (also checks token validity)
+                    frame = await _asyncio.wait_for(
+                        viewer._frame_queue.get(), timeout=2.0
+                    )
                     yield f"event: frame\ndata: {_json.dumps(frame)}\n\n"
-                await _asyncio.sleep(0.25)
+                except _asyncio.TimeoutError:
+                    # Send a "ping" SSE comment to keep connection alive
+                    yield ": ping\n\n"
         except GeneratorExit:
             pass
 

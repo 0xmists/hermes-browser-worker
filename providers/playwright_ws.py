@@ -39,12 +39,14 @@ class ViewerSession:
     authenticated: bool = False
     closed: bool = False
     screenshot_task: Optional[asyncio.Task] = None
-    input_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
-    _latest_frame: Optional[dict] = field(default=None, init=False, repr=False)
+    input_queue: Optional[asyncio.Queue] = None
+    _frame_queue: Optional[asyncio.Queue] = None
 
     def __post_init__(self):
         if self.expires_at == 0.0:
             self.expires_at = self.created_at + 600
+        self.input_queue = asyncio.Queue()
+        self._frame_queue = asyncio.Queue(maxsize=30)
 
 
 class LoginViewerServer:
@@ -141,7 +143,7 @@ class LoginViewerServer:
         return True
 
     async def start_screenshot_stream(self, token: str):
-        """Start streaming screenshots for a viewer. Returns async generator."""
+        """Start screenshot capture for the viewer (idempotent)."""
         viewer = self._viewers.get(token)
         if viewer is None or viewer.closed:
             return
@@ -151,9 +153,11 @@ class LoginViewerServer:
         if not pages:
             await viewer.context.new_page()
 
-        viewer.screenshot_task = asyncio.create_task(
-            self._capture_screenshots(viewer)
-        )
+        # Only start if not already running
+        if viewer.screenshot_task is None or viewer.screenshot_task.done():
+            viewer.screenshot_task = asyncio.create_task(
+                self._capture_screenshots(viewer)
+            )
 
     async def _capture_screenshots(self, viewer: ViewerSession) -> None:
         """Continuously capture screenshots and put them in the stream."""
@@ -181,13 +185,16 @@ class LoginViewerServer:
                     if viewer.closed:
                         return
 
-                    # Store latest frame for SSE pickup
-                    viewer._latest_frame = {
-                        "data": img_b64,
-                        "width": dimensions["width"],
-                        "height": dimensions["height"],
-                        "timestamp": time.time(),
-                    }
+                    # Put frame in queue for SSE pickup
+                    try:
+                        viewer._frame_queue.put_nowait({
+                            "data": img_b64,
+                            "width": dimensions["width"],
+                            "height": dimensions["height"],
+                            "timestamp": time.time(),
+                        })
+                    except asyncio.QueueFull:
+                        pass  # Drop frame if consumer is slow
                 except Exception as e:
                     logger.debug("Screenshot error: %s", e)
 
