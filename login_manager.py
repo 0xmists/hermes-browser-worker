@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Dict, Optional
+from typing import TYPE_CHECKING, Dict, Optional
 
 from login_providers import LoginProvider, LoginSession, LoginState
 from profile_manager import ProfileManager
