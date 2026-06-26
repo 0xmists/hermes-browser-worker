@@ -730,9 +730,9 @@ async def login_wait(token: str):
 
     import asyncio
     frame = None
-    # Wait up to 10 seconds for a frame
+    # Wait up to 5 seconds for a frame
     try:
-        frame = await asyncio.wait_for(viewer._frame_queue.get(), timeout=10.0)
+        frame = await asyncio.wait_for(viewer._frame_queue.get(), timeout=5.0)
     except asyncio.TimeoutError:
         pass
 

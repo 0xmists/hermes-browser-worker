@@ -130,45 +130,51 @@ html, body {
         $loading.style.display = 'none';
     }
 
-    // ─── Frame polling (works better through proxies) ───────
-    let lastFrameTime = 0;
-    let pollInterval = null;
+    // ─── Long polling (proxy-compatible) ───────────────────
+    let pollActive = false;
+    let consecutiveErrors = 0;
 
     function startPolling() {
-        if (pollInterval) return;
-        pollInterval = setInterval(fetchFrame, 200);
+        if (pollActive) return;
+        pollActive = true;
+        pollLoop();
     }
 
-    async function fetchFrame() {
+    async function pollLoop() {
+        while (pollActive) {
+            await fetchFrameLong();
+            if (!pollActive) break;
+            // Small delay between polls to prevent flooding
+            await new Promise(function(r) { setTimeout(r, 100); });
+        }
+    }
+
+    async function fetchFrameLong() {
         try {
-            var resp = await fetch(STREAM_URL.replace("/login-stream/", "/login-frame/"));
+            var resp = await fetch(STREAM_URL.replace("/login-stream/", "/login-wait/"));
             var msg = await resp.json();
             if (msg.ok && msg.data) {
                 drawFrame(msg.data, msg.width, msg.height);
+                consecutiveErrors = 0;
                 if (msg.authenticated) {
                     onAuthenticated();
                 }
-            } else if (msg.waiting) {
-                // No frame yet, try long polling instead
-                try {
-                    var resp2 = await fetch(STREAM_URL.replace("/login-stream/", "/login-wait/"));
-                    var msg2 = await resp2.json();
-                    if (msg2.ok && msg2.data) {
-                        drawFrame(msg2.data, msg2.width, msg2.height);
-                        if (msg2.authenticated) {
-                            onAuthenticated();
-                        }
-                    }
-                } catch (e2) {}
             }
-        } catch (e) {}
+        } catch (e) {
+            consecutiveErrors++;
+            if (consecutiveErrors > 10) {
+                pollActive = false;
+                setStatus('error', 'Connection lost. Reloading...');
+                setTimeout(function() { location.reload(); }, 2000);
+            }
+        }
     }
 
     function onAuthenticated() {
+        pollActive = false;
         setStatus('authenticated', 'Authenticated');
         $successOverlay.classList.add('show');
         if (timerInterval) clearInterval(timerInterval);
-        if (pollInterval) clearInterval(pollInterval);
     }
 
     // Also try SSE (EventSource) — works if proxy doesn't buffer
@@ -329,31 +335,7 @@ html, body {
     // ─── Init ──────────────────────────────────────────────
     initCanvas();
     startTimer();
-    // Try SSE first, fall back to polling
-    try {
-        eventSource = new EventSource(STREAM_URL);
-        eventSource.onopen = function() {
-            connected = true;
-            setStatus('connected', 'Connected (SSE)');
-        };
-        eventSource.addEventListener('frame', function(event) {
-            try {
-                var msg = JSON.parse(event.data);
-                drawFrame(msg.data, msg.width, msg.height);
-            } catch (e) {}
-        });
-        eventSource.addEventListener('authenticated', function() {
-            onAuthenticated();
-            eventSource.close();
-        });
-        eventSource.onerror = function() {
-            eventSource.close();
-            startPolling();
-            setStatus('connected', 'Connected (polling)');
-        };
-    } catch (e) {
-        startPolling();
-    }
+    startPolling();
 
     window.addEventListener('beforeunload', function() {
         if (eventSource) eventSource.close();
