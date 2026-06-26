@@ -94,10 +94,9 @@ html, body {
 
     // Token injected by server
     const TOKEN = '__TOKEN_PLACEHOLDER__';
-    const IS_HTTPS = window.location.protocol === 'https:';
-    const WS_URL = (IS_HTTPS ? 'wss' : 'ws') + '://' + window.location.host + '/login-ws/' + TOKEN;
+    const STREAM_URL = '/login-stream/' + TOKEN;
+    const INPUT_URL = '/login-input/' + TOKEN;
 
-    let ws = null;
     let canvas, ctx;
     let img = new Image();
     let connected = false;
@@ -105,6 +104,7 @@ html, body {
     let lastTouchPos = null;
     let expiresAt = Date.now() + 600000;
     let timerInterval = null;
+    let eventSource = null;
 
     const $statusDot = document.getElementById('status-dot');
     const $statusText = document.getElementById('status-text');
@@ -130,38 +130,49 @@ html, body {
         $loading.style.display = 'none';
     }
 
+    // ─── SSE Connection ─────────────────────────────────────
     function connect() {
-        try { ws = new WebSocket(WS_URL); }
-        catch (e) { setStatus('error', 'Failed to connect'); return; }
+        if (eventSource) { eventSource.close(); }
 
-        ws.onopen = function() {
+        eventSource = new EventSource(STREAM_URL);
+
+        eventSource.onopen = function() {
             connected = true;
             setStatus('connected', 'Connected');
         };
 
-        ws.onmessage = function(event) {
+        eventSource.onmessage = function(event) {
             try { handleMessage(JSON.parse(event.data)); } catch (e) {}
         };
 
-        ws.onclose = function() {
+        eventSource.addEventListener('frame', function(event) {
+            try {
+                var msg = JSON.parse(event.data);
+                drawFrame(msg.data, msg.width, msg.height);
+            } catch (e) {}
+        });
+
+        eventSource.addEventListener('authenticated', function(event) {
+            setStatus('authenticated', 'Authenticated');
+            $successOverlay.classList.add('show');
+            if (timerInterval) clearInterval(timerInterval);
+            if (eventSource) { eventSource.close(); }
+        });
+
+        eventSource.onerror = function() {
             connected = false;
             setStatus('disconnected', 'Disconnected. Reconnecting...');
-            setTimeout(function() { if (!connected) connect(); }, 2000);
+            // EventSource auto-reconnects
         };
-
-        ws.onerror = function() { ws.close(); };
     }
 
     function handleMessage(msg) {
         switch (msg.type) {
-            case 'frame':
-                drawFrame(msg.data, msg.width, msg.height);
-                break;
             case 'authenticated':
                 setStatus('authenticated', 'Authenticated');
                 $successOverlay.classList.add('show');
                 if (timerInterval) clearInterval(timerInterval);
-                setTimeout(function() { if (ws) ws.close(); }, 3000);
+                if (eventSource) { eventSource.close(); }
                 break;
             case 'expired':
                 setStatus('expired', 'Session expired');
@@ -172,10 +183,12 @@ html, body {
         }
     }
 
-    function sendCmd(data) {
-        if (ws && ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify(data));
-        }
+    function sendInput(data) {
+        fetch(INPUT_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data),
+        }).catch(function() {});
     }
 
     function setStatus(state, text) {
@@ -196,18 +209,27 @@ html, body {
         }, 1000);
     }
 
-    // ─── Mouse ──────────────────────────────────────────────
+    // ─── Input handling ─────────────────────────────────────
+    function getCanvasCoords(clientX, clientY) {
+        var rect = canvas.getBoundingClientRect();
+        return {
+            x: (clientX - rect.left) / rect.width,
+            y: (clientY - rect.top) / rect.height
+        };
+    }
+
+    // Mouse
     document.addEventListener('mousedown', function(e) {
         var pos = getCanvasCoords(e.clientX, e.clientY);
-        sendCmd({ type: 'mouse', x: pos.x, y: pos.y, action: 'down', button: e.button });
+        sendInput({ type: 'mouse', x: pos.x, y: pos.y, action: 'down', button: e.button });
     });
     document.addEventListener('mousemove', function(e) {
         var pos = getCanvasCoords(e.clientX, e.clientY);
-        sendCmd({ type: 'mouse', x: pos.x, y: pos.y, action: 'move', button: e.button });
+        sendInput({ type: 'mouse', x: pos.x, y: pos.y, action: 'move', button: e.button });
     });
     document.addEventListener('mouseup', function(e) {
         var pos = getCanvasCoords(e.clientX, e.clientY);
-        sendCmd({ type: 'mouse', x: pos.x, y: pos.y, action: 'up', button: e.button });
+        sendInput({ type: 'mouse', x: pos.x, y: pos.y, action: 'up', button: e.button });
     });
 
     var lastClickTime = 0, lastClickPos = null;
@@ -217,29 +239,29 @@ html, body {
         if (lastClickPos && now - lastClickTime < 300 &&
             Math.abs(pos.x - lastClickPos.x) < 0.02 &&
             Math.abs(pos.y - lastClickPos.y) < 0.02) {
-            sendCmd({ type: 'mouse', x: pos.x, y: pos.y, action: 'click', button: 0 });
+            sendInput({ type: 'mouse', x: pos.x, y: pos.y, action: 'click', button: 0 });
             lastClickTime = 0;
         } else {
-            sendCmd({ type: 'mouse', x: pos.x, y: pos.y, action: 'down', button: 0 });
-            sendCmd({ type: 'mouse', x: pos.x, y: pos.y, action: 'up', button: 0 });
+            sendInput({ type: 'mouse', x: pos.x, y: pos.y, action: 'down', button: 0 });
+            sendInput({ type: 'mouse', x: pos.x, y: pos.y, action: 'up', button: 0 });
             lastClickTime = now;
             lastClickPos = pos;
         }
     });
 
-    // ─── Wheel ──────────────────────────────────────────────
+    // Wheel
     document.addEventListener('wheel', function(e) {
         e.preventDefault();
-        sendCmd({ type: 'wheel', dx: e.deltaX, dy: e.deltaY });
+        sendInput({ type: 'wheel', dx: e.deltaX, dy: e.deltaY });
     }, { passive: false });
 
-    // ─── Keyboard ───────────────────────────────────────────
+    // Keyboard
     document.addEventListener('keydown', function(e) {
         if (['Shift', 'Control', 'Alt', 'Meta'].includes(e.key)) return;
-        sendCmd({ type: 'key', key: e.key, code: e.code, modifiers: getModifiers(e) });
+        sendInput({ type: 'key', key: e.key, code: e.code, modifiers: getModifiers(e) });
         if (e.key.length === 1 || e.key === 'Backspace') {
             e.preventDefault();
-            sendCmd({ type: 'type', text: e.key });
+            sendInput({ type: 'type', text: e.key });
         }
     });
 
@@ -252,7 +274,7 @@ html, body {
         return mods;
     }
 
-    // ─── Touch ──────────────────────────────────────────────
+    // Touch
     var inputLayer = document.getElementById('input-layer');
     var touchStartY = 0;
 
@@ -262,7 +284,7 @@ html, body {
             touchActive = true;
             touchStartY = e.touches[0].clientY;
             var pos = getCanvasCoords(e.touches[0].clientX, e.touches[0].clientY);
-            sendCmd({ type: 'mouse', x: pos.x, y: pos.y, action: 'down', button: 0 });
+            sendInput({ type: 'mouse', x: pos.x, y: pos.y, action: 'down', button: 0 });
             lastTouchPos = pos;
         }
     }, { passive: false });
@@ -272,11 +294,10 @@ html, body {
         if (!touchActive || e.touches.length !== 1) return;
         var touch = e.touches[0];
         var pos = getCanvasCoords(touch.clientX, touch.clientY);
-        sendCmd({ type: 'mouse', x: pos.x, y: pos.y, action: 'move', button: 0 });
-        // Scroll detection
+        sendInput({ type: 'mouse', x: pos.x, y: pos.y, action: 'move', button: 0 });
         var dy = touchStartY - touch.clientY;
         if (Math.abs(dy) > 10) {
-            sendCmd({ type: 'wheel', dx: 0, dy: dy * 2 });
+            sendInput({ type: 'wheel', dx: 0, dy: dy * 2 });
             touchStartY = touch.clientY;
         }
         lastTouchPos = pos;
@@ -286,25 +307,18 @@ html, body {
         e.preventDefault();
         touchActive = false;
         if (lastTouchPos) {
-            sendCmd({ type: 'mouse', x: lastTouchPos.x, y: lastTouchPos.y, action: 'up', button: 0 });
+            sendInput({ type: 'mouse', x: lastTouchPos.x, y: lastTouchPos.y, action: 'up', button: 0 });
         }
     }, { passive: false });
-
-    // ─── Helpers ────────────────────────────────────────────
-    function getCanvasCoords(clientX, clientY) {
-        var rect = canvas.getBoundingClientRect();
-        return {
-            x: (clientX - rect.left) / rect.width,
-            y: (clientY - rect.top) / rect.height
-        };
-    }
 
     // ─── Init ──────────────────────────────────────────────
     initCanvas();
     connect();
     startTimer();
 
-    window.addEventListener('beforeunload', function() { if (ws) ws.close(); });
+    window.addEventListener('beforeunload', function() {
+        if (eventSource) eventSource.close();
+    });
 })();
 </script>
 </body>

@@ -16,7 +16,8 @@ Endpoints:
     POST /raw
     POST /login/start
     GET  /login/{token}          → Login page (browser viewer)
-    WS   /login-ws/{token}        → Viewer WebSocket relay
+    GET  /login-stream/{token}    → SSE screenshot stream
+    POST /login-input/{token}     → Input events (mouse/keyboard/touch)
     GET  /login/status/{session_id}
     POST /login/authenticate
     POST /login/cancel
@@ -34,7 +35,8 @@ import time
 import logging
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from playwright.async_api import TimeoutError as PlaywrightTimeout
 
@@ -631,45 +633,73 @@ async def login_page(token: str):
     if not viewer_server.validate_token(token):
         raise HTTPException(status_code=404, detail="Login token not found or expired")
 
-    # Read login.html and inject the token
     import os
     html_path = os.path.join(os.path.dirname(__file__), "login.html")
     with open(html_path, "r") as f:
         html = f.read()
 
-    # Inject the token into the page
     html = html.replace("__TOKEN_PLACEHOLDER__", token)
 
-    from fastapi.responses import HTMLResponse
     return HTMLResponse(content=html)
 
 
-@app.websocket("/login-ws/{token}")
-async def login_websocket(websocket: WebSocket, token: str):
-    """WebSocket relay for browser viewer."""
+@app.get("/login-stream/{token}")
+async def login_stream(token: str):
+    """SSE stream of browser screenshots for a login session."""
     from providers.playwright_ws import get_viewer_server
     viewer_server = get_viewer_server()
 
     if not viewer_server.validate_token(token):
-        await websocket.close(code=4001, reason="Invalid token")
-        return
+        raise HTTPException(status_code=404, detail="Login token not found or expired")
 
-    await websocket.accept()
-
-    viewer = await viewer_server.connect_ws(token, websocket)
+    viewer = viewer_server.get_viewer(token)
     if viewer is None:
-        await websocket.close(code=4001, reason="Viewer not found")
-        return
+        raise HTTPException(status_code=404, detail="Viewer not found")
 
+    async def event_stream():
+        import json as _json
+        import asyncio as _asyncio
+
+        # Start screenshot capture
+        await viewer_server.start_screenshot_stream(token)
+
+        try:
+            while viewer_server.validate_token(token):
+                frame = getattr(viewer, "_latest_frame", None)
+                if frame:
+                    yield f"event: frame\ndata: {_json.dumps(frame)}\n\n"
+                await _asyncio.sleep(0.25)
+        except GeneratorExit:
+            pass
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.post("/login-input/{token}")
+async def login_input(token: str, request: Request):
+    """Receive input events from the client (mouse, keyboard, touch)."""
+    from providers.playwright_ws import get_viewer_server
+    viewer_server = get_viewer_server()
+
+    if not viewer_server.validate_token(token):
+        raise HTTPException(status_code=404, detail="Login token not found or expired")
+
+    body = await request.body()
     try:
-        while True:
-            data = await websocket.receive_json()
-            await viewer_server.handle_client_message(token, data)
-    except WebSocketDisconnect:
-        await viewer_server.disconnect_ws(token)
-    except Exception as e:
-        _logger.error("WebSocket error for token %s: %s", token[:8], e)
-        await viewer_server.disconnect_ws(token)
+        data = json.loads(body)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+
+    await viewer_server.process_input(token, data)
+    return {"ok": True}
 
 
 @app.post("/login/cancel")

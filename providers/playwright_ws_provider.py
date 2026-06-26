@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
@@ -55,7 +56,7 @@ class PlaywrightWSProvider(LoginProvider):
             session.login_url = session.site if session.site.startswith("http") else f"https://{session.site}"
             session.connect_url = f"/login/{token}"
             session.state = LoginState.WAITING_USER
-            session.expires_at = __import__("time").time() + 600
+            session.expires_at = time.time() + 600
             session.transport_id = token
 
             self._active[session.session_id] = session
@@ -75,7 +76,7 @@ class PlaywrightWSProvider(LoginProvider):
             logger.error("PlaywrightWSProvider.start failed: %s", e, exc_info=True)
             session.login_url = session.site if session.site.startswith("http") else f"https://{session.site}"
             session.state = LoginState.WAITING_USER
-            session.expires_at = __import__("time").time() + 600
+            session.expires_at = time.time() + 600
             self._active[session.session_id] = session
             return session
 
@@ -107,7 +108,6 @@ class PlaywrightWSProvider(LoginProvider):
     ) -> None:
         """Background task: monitor for authentication and invalidate token."""
         try:
-            import time as _time
             viewer_server = get_viewer_server()
             context = viewer_server.get_context(token)
 
@@ -128,19 +128,11 @@ class PlaywrightWSProvider(LoginProvider):
                     session = self._active.get(session_id)
                     if session:
                         session.state = LoginState.AUTHENTICATED
-                        session.authenticated_at = _time.time()
+                        session.authenticated_at = time.time()
                         logger.info("Session %s authenticated: %s", session_id[:16], result.reason)
 
                     # Invalidate token (closes viewer, keeps profile)
                     await viewer_server.invalidate_token(token)
-
-                    # Notify connected clients
-                    v = viewer_server.get_viewer(token)
-                    if v and v.ws and not v.closed:
-                        try:
-                            await v.ws.send_json({"type": "authenticated"})
-                        except Exception:
-                            pass
                     return
 
                 await asyncio.sleep(2.0)
